@@ -1,0 +1,119 @@
+# The MINIMAL reproducibility_check Docker image: R + Quarto + only the
+# packages seen in >=3 files across the corpus scan (393 packages, see
+# common_packages.csv) -- a smaller, more conservative alternative to
+# the full metacheck-repro image (753 packages, Dockerfile). No LaTeX, no
+# CmdStan, and (unlike the full image) NO GDAL/GEOS/PROJ dev headers either:
+# the geospatial stack (sf/terra/raster/rgdal/rgeos/...) covers at most 4 of
+# 2330 scanned corpus files, well under this image's own >=3-files bar, so
+# it is excluded here on the same reasoning that excluded it from the base
+# image's rocker/geospatial ancestor. A paper needing one of the packages
+# this image omits still gets it installed at PAPER RUN TIME (slower, needs
+# network) via repro_install_deps_docker() -- this image only pre-bakes the
+# packages common enough to be worth the build cost.
+#
+# Same multi-stage structure and fixes as Dockerfile (see that file's own
+# header comments for the full reasoning): a "builder" stage with -dev
+# headers compiles the package list; the final stage copies over only the
+# compiled library + Quarto + runtime (non-dev) system libraries. Same
+# --no-docs/--no-html/--no-help install flags and post-install help/html/doc
+# strip (Meta/ deliberately KEPT -- see install_packages.R and this
+# Dockerfile's sibling for why: installed.packages() silently breaks without
+# it). Same missing-.so-library fixes (libuv1t64 for fs/osfr, libglpk for
+# igraph-family packages, libgsl for copula/energy/MVN/rtdists, libnetcdf,
+# libtcl/libtk) -- found the hard way against the full package list, kept
+# here even though this list is smaller, since several of these ARE in the
+# >=3-files list too (e.g. fs is an extremely common transitive dependency).
+#
+# Build (from metacheck_demo/docker/):
+#   docker build -t metacheck-repro:minimal -f Dockerfile.minimal .
+# reachable as /build/common_packages.csv inside the build)
+
+# ══════════════════════════ STAGE 1: builder ═══════════════════════════════
+FROM rocker/r-ver:latest AS builder
+
+# ── Quarto ───────────────────────────────────────────────────────────────
+# Same R-native download (no curl/wget/grep -P in bare rocker/r-ver -- see
+# Dockerfile's own comment on this for the full explanation).
+RUN Rscript -e '\
+  j <- readLines("https://quarto.org/docs/download/_download.json", warn = FALSE); \
+  v <- sub(".*\"version\":\\s*\"([^\"]+)\".*", "\\1", j[grepl("\"version\"", j)][1]); \
+  cat("Quarto version:", v, "\n"); \
+  url <- paste0("https://github.com/quarto-dev/quarto-cli/releases/download/v", v, "/quarto-", v, "-linux-amd64.deb"); \
+  download.file(url, "/tmp/quarto.deb", quiet = FALSE)' \
+    && apt-get update && apt-get install -y --no-install-recommends /tmp/quarto.deb \
+    && rm -f /tmp/quarto.deb && rm -rf /var/lib/apt/lists/*
+
+# ── System -dev headers needed to COMPILE this smaller package list ────────
+# No libgdal-dev/libgeos-dev/libproj-dev/tcl-dev/tk-dev/libnetcdf-dev here:
+# omitted deliberately (see header comment) -- a package needing them (sf,
+# geoR, ...) simply is not in this image's 393-package list to begin with.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpoppler-cpp-dev \
+    libmagick++-dev \
+    librsvg2-dev \
+    libcurl4-openssl-dev \
+    libssl-dev \
+    libuv1t64 \
+    libxml2-dev \
+    libfontconfig1-dev \
+    libfreetype6-dev \
+    fonts-dejavu \
+    fonts-liberation \
+    ghostscript \
+    libglpk-dev \
+    libgsl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── R packages: the >=3-files corpus subset ─────────────────────────────────
+# PKG_CSV points install_packages.R at common_packages.csv instead of
+# its own default (all_packages.csv, the full 753-package list)
+# -- same script, same CRAN -> CRAN Archive retry logic, different input.
+RUN mkdir -p /build
+COPY common_packages.csv /build/common_packages.csv
+COPY install_packages.R /build/install_packages.R
+ENV PKG_CSV=/build/common_packages.csv
+RUN Rscript /build/install_packages.R
+
+# ── Strip per-package documentation NOT needed at runtime ─────────────────
+# See Dockerfile's own comment for the full measured rationale (924MB help/
+# html, 568MB doc/ across the FULL package list -- proportionally smaller
+# here with only 393 packages, but the same waste per package). Meta/ is
+# DELIBERATELY KEPT -- stripping it breaks installed.packages() entirely
+# (confirmed the hard way on the full-image build; see Dockerfile).
+RUN find /usr/local/lib/R/site-library -maxdepth 2 -type d \
+      \( -name help -o -name html -o -name doc \) -exec rm -rf {} + 2>/dev/null || true
+
+# ── Strip debug symbols from compiled package .so files ────────────────────
+RUN find /usr/local/lib/R/site-library -name "*.so" -exec strip --strip-unneeded {} + 2>/dev/null || true
+
+# ══════════════════════════ STAGE 2: runtime ═══════════════════════════════
+FROM rocker/r-ver:latest
+
+COPY --from=builder /opt/quarto /opt/quarto
+RUN ln -sf /opt/quarto/bin/quarto /usr/local/bin/quarto
+COPY --from=builder /usr/local/lib/R/site-library /usr/local/lib/R/site-library
+
+# Runtime-only counterparts of the builder stage's -dev packages.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpoppler-cpp0t64 \
+    libmagick++-6.q16-9t64 \
+    librsvg2-2 librsvg2-common \
+    libcurl4 \
+    libssl3 \
+    libuv1t64 \
+    libxml2 \
+    libfontconfig1 \
+    libfreetype6 \
+    fonts-dejavu \
+    fonts-liberation \
+    ghostscript \
+    libglpk40 \
+    libgsl27 libgslcblas0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Non-root user the run phase actually uses ───────────────────────────────
+# See Dockerfile's own comment: repro_run_scripts_docker() always runs as
+# uid:gid 1000:1000; bare rocker/r-ver has no such user by default.
+RUN useradd -m -u 1000 -s /bin/bash rcheck
+
+CMD ["R"]
