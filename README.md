@@ -6,17 +6,43 @@ Running a paper's downloaded code with `sandbox = "docker"` sandboxes it (no
 network, read-only filesystem, non-root user) instead of running it directly
 on your machine — see `R/reproducibility_check_docker.R` in the main
 metacheck repo for the backend itself. These images exist so that sandbox
-run doesn't have to compile ~400-750 R packages from scratch every time.
+run doesn't have to compile ~400-750 R packages (or install ~50-120 Python
+packages) from scratch every time.
+
+**Naming/publish status as of 2026-10 (confirmed by direct `docker pull`,
+not assumed from this README alone — see the next session's own notes
+before trusting any image name here without checking):** `ghcr.io/
+scienceverse/metacheck_r:latest` (the single, un-split image) is the ONLY R
+image actually live on the registry right now. `metacheck_r_large`/
+`metacheck_r_small` below describe Dockerfiles that exist in this repo and
+have been built and smoke-tested LOCALLY, but have NOT yet been pushed to
+`ghcr.io` — `metacheck-new`'s own R code (`.repro_docker_default_image` in
+`R/reproducibility_check_docker.R`) was briefly pointed at
+`metacheck_r_large` and had to be reverted once a real `docker pull`
+confirmed it did not exist. **Before changing that constant again, run
+`docker pull ghcr.io/scienceverse/<name>:latest` yourself and confirm it
+succeeds — do not trust this file's own naming claims without checking.**
+The Python images (`metacheck_py_small`/`metacheck_py_large`) are in the
+same state: built and tested locally, not yet pushed.
 
 ## Images
 
-| Image | Tag | Packages | Size (uncompressed) | Use when |
+| Image | Tag | Contents | Size (uncompressed) | Use when |
 |---|---|---|---|---|
-| `ghcr.io/scienceverse/metacheck_r_large` | `latest` | ~750 (every package seen anywhere in the corpus scan) | ~4.5GB | You want maximum coverage and don't mind a bigger pull |
-| `ghcr.io/scienceverse/metacheck_r_small` | `latest` | ~390 (packages seen in ≥3 corpus files) | ~3.8GB | Smaller, more conservative default; a paper needing an uncommon package falls back to installing it at run time |
+| `metacheck_r_large` | `latest` | ~750 R packages (every package seen anywhere in the corpus scan) + JAGS + a JDK + the GDAL/GEOS/PROJ geospatial stack (sf/terra/stars/rgl/tmap/...) | ~4.9GB | You want maximum R coverage, including geospatial/ecology and JAGS-based Bayesian papers, and don't mind a bigger pull |
+| `metacheck_r_small` | `latest` | ~390 R packages (seen in ≥3 corpus files) + JAGS + a JDK | ~4.4GB | Smaller, more conservative default; a paper needing an uncommon or geospatial package falls back to installing it at run time |
+| `metacheck_py_small` | `latest` | ~45 Python packages seen in ≥2 of 486 scanned files (numpy/pandas/scipy/matplotlib/seaborn/scikit-learn/statsmodels/django/pytest/...) | ~2.7GB | Default for Python reproducibility checks; a paper needing an uncommon package installs it at run time |
+| `metacheck_py_large` | `latest` | everything `metacheck_py_small` has, plus ~70 more less-common packages and CPU-only torch + tensorflow-cpu | ~8.3GB | A paper uses a deep-learning framework and you don't want the slow run-time install |
 
-Both include R (`rocker/r-ver` base) and Quarto. Neither includes LaTeX/TinyTeX
-or CmdStan — see "Planned variants" below.
+The R images include R (`rocker/r-ver` base) and Quarto. Neither includes
+LaTeX/TinyTeX or CmdStan — see "Planned variants" below. The Python images
+are built on `python:3.11-slim`; see "Python images" below for their own
+build notes. `psychopy` was deliberately excluded from both Python images
+despite being common in the scan (18 of 486 files) — it is a live-
+experiment stimulus-presentation library (GUI/audio/video/serial-port I/O)
+with no legitimate use in an analysis-only execute phase, and its own
+install pulls in PyQt6 + ffmpeg/moviepy/pyglet (measured: ~700MB) for
+nothing this image's own use case needs.
 
 ## Quick start
 
@@ -31,6 +57,8 @@ changed since this README was written.)
 
 ## Building from source
 
+### R images
+
 Both Dockerfiles are self-contained in this repo (Dockerfile + its package
 CSV sit side by side, no external build context needed):
 
@@ -42,37 +70,104 @@ docker build -t metacheck_r_large:latest -f Dockerfile .
 docker build -t metacheck_r_small:latest -f Dockerfile.minimal .
 ```
 
-Expect the large build to take 30-60+ minutes and the small build roughly
-half that — most of the time is R packages either downloading as binaries
-(fast) or compiling from source (slow; no binary exists for every
-platform/package combination on Posit Package Manager).
+Expect the large build to take **2+ hours** as of the 2026-10 JAGS/
+geospatial additions (measured directly: ~2.3 hours for the full ~750-
+package list including `brms`/Stan-family source compiles) — longer than
+this file's earlier "30-60+ minutes" estimate, which predates those
+additions. The small build is faster but still expect 25-30+ minutes. Most
+of the time is R packages either downloading as binaries (fast) or
+compiling from source (slow; no binary exists for every platform/package
+combination on Posit Package Manager).
+
+**Build these ONE AT A TIME, not concurrently** — confirmed directly as a
+real failure mode, not a theoretical one: running the large and small
+builds at the same time exhausted the host's disk (Docker Desktop's own
+WSL2 virtual disk on Windows does not shrink back down after a build
+completes or is pruned — it stays at its own high-water mark until the
+`.vhdx` is manually compacted), which crashed Docker Desktop itself
+mid-build with `dpkg: unrecoverable fatal error ... Input/output error` on
+BOTH builds. `docker builder prune -af` reclaims build-cache SPACE Docker
+itself tracks, but does not shrink the underlying WSL2 disk file back down
+on Windows — if `df`/disk usage stays high after pruning, that is the next
+thing to check, not a sign the prune failed.
+
+### Python images
+
+```bash
+# Small image (~45 packages: numpy/pandas/scipy/matplotlib/seaborn/
+# scikit-learn/statsmodels/django/pytest/...)
+docker build -t metacheck_py_small:latest -f Dockerfile.py.small .
+
+# Large image (built FROM metacheck_py_small -- build that first):
+# ~70 more packages + CPU-only torch + tensorflow-cpu
+docker build -t metacheck_py_large:latest -f Dockerfile.py.large .
+```
+
+Much faster than the R builds (~7 minutes for the small image, since pip
+installs pre-compiled wheels for nearly everything in the list rather than
+compiling from source) — except the large image's torch/tensorflow-cpu
+downloads, which dominate its own build time.
 
 ### Updating the package lists
 
-`all_packages.csv` and `common_packages.csv` are `package,n_files` tables
-generated by scanning a local corpus cache of downloaded papers for
+`all_packages.csv` and `common_packages.csv` (R) are `package,n_files`
+tables generated by scanning a local corpus cache of downloaded papers for
 `library()`/`require()`/`p_load()` calls (via metacheck's own
-`code_library_names()`). To regenerate them against a newer/larger corpus,
-scan every `.R`/`.Rmd`/`.qmd` file in the corpus cache with
+`code_library_names()`). `all_packages_py.csv` and `common_packages_py.csv`
+(Python) are the same idea via `code_library_names(lang = "Python")`
+against a Python corpus cache's `import`/`from ... import` statements
+(2026-10, 486 files scanned), with a `pypi_package` column instead of
+`package` since the importable module name and the installable PyPI
+distribution name sometimes differ (`sklearn` → `scikit-learn`, `cv2` →
+`opencv-python`, `PIL` → `Pillow`, `yaml` → `PyYAML`). To regenerate either
+side against a newer/larger corpus, scan every file with
 `code_library_names()` and tally package frequency into a `package,n_files`
-table (see the metacheck project session notes, 2026-08, for the exact scan
-script used to build the current lists).
+table (see the metacheck project session notes, 2026-08 for R / 2026-10 for
+Python, for the exact scan scripts used to build the current lists).
 
-`common_packages.csv` should be `all_packages.csv` filtered to `n_files >= 3`
-(or whatever cutoff feels right — this is a judgement call, not a fixed rule).
+The raw scan output needs manual filtering before it is a usable package
+list — confirmed necessary both times this has been done: a static import/
+library() scan cannot tell a real installable package from (a) a paper's
+OWN local module/script picked up by the same regex (the Python scan's
+raw output included things like a single paper's own `probCMR_overrides`
+module, and — more subtly — a corpus that happens to contain a PACKAGE'S
+OWN source repository as one of its "papers" inflates that package's own
+internal submodule imports to look like heavy real-world usage: the 2026-10
+scan's `innvestigate` entry at 45 files was entirely this artefact, traced
+to the corpus containing `innvestigate`'s own GitHub repo), (b) Python
+2-era stdlib names a straggling compat script imports (`StringIO`,
+`ConfigParser`), and (c) a package that is real but needs manual
+intervention to install at all (`psiturk`: needs a C compiler for
+`psutil`/`setproctitle`, dropped rather than fought for a niche tool).
+
+`common_packages.csv`/`common_packages_py.csv` should be the `all_`
+variant filtered to `n_files >= 3` (R) / `>= 2` (Python, since the smaller
+486-file Python corpus makes `>= 3` too strict a cutoff) — or whatever
+cutoff feels right; this is a judgement call, not a fixed rule.
 
 ### Pushing a new build
 
 ```bash
+# R
 docker tag metacheck_r_large:latest ghcr.io/scienceverse/metacheck_r_large:latest
 docker push ghcr.io/scienceverse/metacheck_r_large:latest
-
 docker tag metacheck_r_small:latest ghcr.io/scienceverse/metacheck_r_small:latest
 docker push ghcr.io/scienceverse/metacheck_r_small:latest
+
+# Python
+docker tag metacheck_py_small:latest ghcr.io/scienceverse/metacheck_py_small:latest
+docker push ghcr.io/scienceverse/metacheck_py_small:latest
+docker tag metacheck_py_large:latest ghcr.io/scienceverse/metacheck_py_large:latest
+docker push ghcr.io/scienceverse/metacheck_py_large:latest
 ```
 
 Requires `docker login ghcr.io` with a token that has `write:packages` scope
-and push access to the `scienceverse` org.
+and push access to the `scienceverse` org. **After pushing, update
+`metacheck-new`'s `.repro_docker_default_image`/`.repro_docker_default_image_py`
+constants (`R/reproducibility_check_docker.R` /
+`R/reproducibility_check_python_docker.R`) to point at the newly-pushed
+name — AND verify with `docker pull` first** (see the naming-status note at
+the top of this file for why that verification step is not optional).
 
 ## Reducing image size: what we learned (2026-08)
 
@@ -184,6 +279,58 @@ library(thepackage)   # the REAL test -- install succeeding is not enough
 
 and read the `dyn.load()` error for the missing `.so` name.
 
+### 2026-10 additions: JAGS, a JDK, and the geospatial stack
+
+Added to both R Dockerfiles after a real BES (ecology journal) corpus run
+surfaced a concrete, ranked list of "installed but not loadable" failures:
+`sf` (45 occurrences), `rgdal` (25), `rgeos` (14), `maptools` (10), plus
+`stars`/`tmap`/`mapview`/`ggspatial`/`rgl` (4-6 each) on the geospatial
+side, and `rjags`/`rJava`/`glmulti`/`R2jags` (matching issue #395) on the
+JAGS/Java side. Two NEW instances of the missing-runtime-.so class the
+section above already documents, found fixing this:
+
+- **`rgl` needs `libpng-dev`/`libpng16-16`** (compile/runtime), not just the
+  OpenGL/X11 headers its own documentation emphasises — it directly
+  `#include`s `png.h` for its 3D device's texture/image support,
+  independent of the GL/X11 path. Confirmed as the ONLY remaining blocker
+  once JAGS/JDK/OpenGL/X11 were already in place for a different reason.
+- **`rjags` compiles and installs cleanly, but fails to LOAD** with `File
+  not found: /usr/lib/JAGS/modules-4/basemod.so` — Ubuntu's own `jags` apt
+  package installs its modules at the Debian MULTIARCH path
+  (`/usr/lib/x86_64-linux-gnu/JAGS/modules-4/`), but `rjags`'s own
+  `configure` script resolves (hardcodes, at COMPILE time) the
+  non-multiarch path instead. Fixed with a symlink
+  (`ln -s /usr/lib/x86_64-linux-gnu/JAGS/modules-4 /usr/lib/JAGS/modules-4`),
+  confirmed sufficient on its own — created in BOTH stages (builder, since
+  that is where `rjags` is compiled and its expected search path gets baked
+  in; runtime, since it has its own freshly apt-installed `jags` at the
+  same layout).
+
+`rgdal`/`rgeos` remain genuinely broken and are NOT fixable by adding
+system libraries — confirmed directly (`install.packages("rgdal")` itself
+reports "package is not available for this version of R" even with every
+relevant `-dev` header present): both were formally removed from CRAN's
+live index in 2023, exactly the "uncertain, needs a real test" risk issue
+#395 itself flagged before this was investigated. `sf`/`terra`/`stars` are
+their modern, actively-maintained replacements and all load correctly.
+
+**`psychopy` was found and testing-confirmed, then REMOVED from the Python
+package lists** after being included once — see the "Python images" table
+entry above for why it has no legitimate use in this execute phase, and the
+~700MB it cost before being dropped.
+
+**Status as of this write-up:** `metacheck_r_small` was rebuilt with ALL of
+the above fixes and verified. `metacheck_r_large` was rebuilt with the
+JAGS/JDK/OpenGL/X11/udunits fixes and verified (`sf`/`stars`/`units`/
+`rjags`/`rJava`/`jagsUI`/`runjags`/`mapview`/`ggspatial`/`R2jags`/
+`glmulti`/`lwgeom`/`tmap` all confirmed loading correctly against it), but
+**NOT yet rebuilt with the later `libpng-dev` + `rjags` symlink fixes**
+(found testing AFTER that build) due to running out of local disk space
+mid-session — rebuild it with the current Dockerfile before relying on
+`rgl` loading in the large image specifically, or re-verify first with
+`docker run --rm metacheck_r_large:latest Rscript -e
+'requireNamespace("rgl", quietly = TRUE)'`.
+
 ## Planned variants (not yet built)
 
 - **TinyTeX layer** (`rmarkdown`/`knitr`/`bookdown`/`papaja` PDF rendering) —
@@ -201,10 +348,22 @@ and read the `dyn.load()` error for the missing `.so` name.
 
 ## Files in this repo
 
-- `Dockerfile` — the large image (~750 packages)
-- `Dockerfile.minimal` — the small image (~390 packages, `n_files >= 3`)
-- `install_packages.R` — shared install script both Dockerfiles use (reads
-  `PKG_CSV` env var to pick which package list; defaults to `all_packages.csv`)
-- `all_packages.csv` — every package found in the corpus scan, with `n_files`
-  (how many scanned files referenced it)
-- `common_packages.csv` — the `n_files >= 3` subset used by `Dockerfile.minimal`
+- `Dockerfile` — the large R image (~750 packages + JAGS/JDK/geospatial)
+- `Dockerfile.minimal` — the small R image (~390 packages, `n_files >= 3`,
+  + JAGS/JDK)
+- `install_packages.R` — shared install script both R Dockerfiles use
+  (reads `PKG_CSV` env var to pick which package list; defaults to
+  `all_packages.csv`)
+- `all_packages.csv` — every R package found in the corpus scan, with
+  `n_files` (how many scanned files referenced it)
+- `common_packages.csv` — the `n_files >= 3` subset used by
+  `Dockerfile.minimal`
+- `Dockerfile.py.small` — the small Python image (~45 packages,
+  `n_files >= 2` of a 486-file scan)
+- `Dockerfile.py.large` — the large Python image (built FROM
+  `metacheck_py_small`; ~70 more packages + CPU-only torch/tensorflow-cpu)
+- `install_packages_py.py` — shared install script both Python Dockerfiles
+  use (reads `PKG_CSV`/`HEAVY_DL` env vars)
+- `all_packages_py.csv` / `common_packages_py.csv` — the Python
+  equivalents of the two R CSVs above, with a `pypi_package` column (see
+  "Updating the package lists")

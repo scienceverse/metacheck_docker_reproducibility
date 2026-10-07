@@ -1,0 +1,44 @@
+# The LARGE reproducibility_check Python Docker image: everything
+# Dockerfile.py.small has, PLUS every other real PyPI package seen anywhere
+# in the corpus scan (81 more packages, all_packages_py.csv) PLUS CPU-only
+# torch and tensorflow -- the two heaviest libraries in the scan (47 and 41
+# of 486 files respectively), deliberately excluded from the small image
+# because of their size (see this repo's README) but common enough to be
+# worth a dedicated larger image rather than forcing every such paper
+# through a slow, from-scratch run-time pip install.
+#
+# Built FROM the small image's own tag (not FROM python:3.11-slim again):
+# every package the small image already installed is reused as-is via
+# Docker's layer cache, so this image's own unique cost is genuinely just
+# the incremental 81 packages + torch/tensorflow, not a second full
+# data-science stack. Requires metacheck_py_small:latest to already be
+# built locally (or pulled) before this builds.
+#
+# CPU-only wheels specifically for torch/tensorflow: the default PyPI
+# `torch` wheel pulls in CUDA runtime libraries several GB in size that are
+# useless in a sandboxed, GPU-less container (repro_run_scripts_py_docker()
+# never exposes a GPU to the container) -- torch's own CPU-only wheel index
+# (download.pytorch.org/whl/cpu) and the separate `tensorflow-cpu` PyPI
+# package both avoid that. install_packages_py.py's own HEAVY_DL=1 branch
+# does this automatically.
+#
+# Build (metacheck_py_small:latest must exist first):
+#   docker build -t metacheck_py_small:latest -f Dockerfile.py.small .
+#   docker build -t metacheck_py_large:latest -f Dockerfile.py.large .
+
+FROM metacheck_py_small:latest
+
+# Switch back to root for the install step: the small image's own last
+# instruction (useradd) does not itself drop to that user (CMD is not RUN),
+# but being explicit here costs nothing and protects against a future
+# small-image change that DOES add a USER instruction before this FROM.
+USER root
+
+RUN mkdir -p /build
+COPY all_packages_py.csv /build/all_packages_py.csv
+COPY install_packages_py.py /build/install_packages_py.py
+ENV PKG_CSV=/build/all_packages_py.csv
+ENV HEAVY_DL=1
+RUN python /build/install_packages_py.py
+
+CMD ["python3"]

@@ -1,0 +1,54 @@
+# The SMALL reproducibility_check Python Docker image: Python 3 + the
+# packages seen in >=2 files across a corpus scan of 486 real papers' Python
+# code (52 packages, see common_packages_py.csv) -- numpy/pandas/matplotlib/
+# scipy/seaborn/scikit-learn/statsmodels and the rest of the common
+# data-science/psychology-research stack, EXCLUDING torch/tensorflow (see
+# Dockerfile.py.large and this repo's README for why those are a separate,
+# bigger image rather than baked in here despite being common in the scan).
+#
+# Unlike the R images, this is NOT a multi-stage build: PyPI serves
+# pre-compiled binary wheels for every package in this list on the
+# manylinux/linux-x86_64 platform this image targets (confirmed: numpy,
+# pandas, scipy, matplotlib, scikit-learn, statsmodels all ship manylinux
+# wheels for current Python versions), so there is no compiler toolchain or
+# -dev header install to strip afterward the way the R build's -dev headers
+# (needed only to COMPILE a CRAN source package) had to be. The slim base
+# image is already close to the realistic floor for this package list.
+#
+# System libraries ARE still needed at RUNTIME for a few packages whose
+# wheel bundles the Python extension but still dlopen()s a system shared
+# library: matplotlib's Agg backend needs none, but a paper using cv2
+# (opencv-python) needs libGL or it fails to import at all (confirmed: a
+# bare python:3.11-slim's `import cv2` raises "ImportError: libGL.so.1:
+# cannot open shared object file" -- opencv-python's wheel bundles its own
+# compiled .so but still dynamically links against the system's OpenGL/X11
+# stack), and Pillow needs libjpeg/libpng's runtime libraries for some image
+# formats despite usually bundling its own via wheel.
+#
+# Build:
+#   docker build -t metacheck_py_small:latest -f Dockerfile.py.small .
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    libjpeg62-turbo \
+    libpng16-16 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /build
+COPY common_packages_py.csv /build/common_packages_py.csv
+COPY install_packages_py.py /build/install_packages_py.py
+ENV PKG_CSV=/build/common_packages_py.csv
+RUN python /build/install_packages_py.py
+
+# Non-root user the run phase actually uses: repro_run_scripts_py_docker()
+# (R/reproducibility_check_python_docker.R) always runs as uid:gid 1000:1000,
+# the SAME fixed id the R backend's .repro_docker_uid uses -- consistent
+# across every docker run this package makes, R or Python. python:3.11-slim
+# has no uid-1000 user by default (confirmed, same situation as bare
+# rocker/r-ver on the R side), so one is created explicitly here.
+RUN useradd -m -u 1000 -s /bin/bash pycheck
+
+CMD ["python3"]

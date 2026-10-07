@@ -62,7 +62,29 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ghostscript \
     libglpk-dev \
     libgsl-dev \
+    jags \
+    default-jdk \
     && rm -rf /var/lib/apt/lists/*
+# jags + default-jdk: `runjags` IS in this image's own >=3-files package
+# list (common_packages.csv), which pulls in `rjags` as a dependency --
+# without the JAGS binary/JDK present, the SAME "installed but not
+# loadable" failure the full image's own header comment documents (issue
+# #395, confirmed against a real BES-corpus run) applies here too.
+RUN R CMD javareconf
+
+# rjags module-path symlink -- confirmed as a SEPARATE real bug from the
+# missing-JAGS-binary one above, found testing THIS image specifically:
+# rjags compiles and installs cleanly once jags/default-jdk are present,
+# but then fails to LOAD with "File not found:
+# /usr/lib/JAGS/modules-4/basemod.so". Ubuntu's `jags` apt package installs
+# its modules at the Debian MULTIARCH path
+# (/usr/lib/x86_64-linux-gnu/JAGS/modules-4/), but rjags's own configure
+# script hardcodes the non-multiarch path at COMPILE time instead -- see
+# the full (large) Dockerfile's identical fix/comment for the complete
+# explanation; duplicated here rather than only in that file since this
+# image compiles its OWN copy of rjags independently.
+RUN mkdir -p /usr/lib/JAGS && \
+    ln -s /usr/lib/x86_64-linux-gnu/JAGS/modules-4 /usr/lib/JAGS/modules-4
 
 # ── R packages: the >=3-files corpus subset ─────────────────────────────────
 # PKG_CSV points install_packages.R at common_packages.csv instead of
@@ -109,7 +131,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ghostscript \
     libglpk40 \
     libgsl27 libgslcblas0 \
+    jags \
+    default-jdk \
     && rm -rf /var/lib/apt/lists/*
+RUN R CMD javareconf
+RUN mkdir -p /usr/lib/JAGS && \
+    ln -s /usr/lib/x86_64-linux-gnu/JAGS/modules-4 /usr/lib/JAGS/modules-4
 
 # ── Non-root user the run phase actually uses ───────────────────────────────
 # See Dockerfile's own comment: repro_run_scripts_docker() always runs as

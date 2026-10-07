@@ -83,12 +83,70 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnetcdf-dev \
     tcl-dev tk-dev \
     libgdal-dev libgeos-dev libproj-dev \
+    libudunits2-dev \
+    libgl1-mesa-dev libglu1-mesa-dev libx11-dev libfreetype6-dev \
+    libpng-dev \
+    jags \
+    default-jdk \
     && rm -rf /var/lib/apt/lists/*
 # libgdal-dev/libgeos-dev/libproj-dev: added so sf/terra/raster/rgdal/rgeos
 # (previously failing outright, since rocker/geospatial's stack was dropped
 # for being mostly unused -- see header comment) at least get a chance to
 # install; still expected to be large/slow for the ~4-file corpus payoff
 # they represent, but now a real attempt rather than a guaranteed failure.
+#
+# libudunits2-dev: `units` (a transitive sf/stars dependency -- confirmed as
+# a real "installed but not loadable" failure against a real BES-corpus run,
+# not a hypothetical) needs libudunits2 at both compile AND runtime; without
+# it install.packages("units") itself fails outright (not even the
+# install-succeeds-load-fails pattern -- it never gets that far).
+#
+# libgl1-mesa-dev/libglu1-mesa-dev/libx11-dev: `rgl` (common alongside sf/
+# terra for 3D visualisation -- also a confirmed real "not loadable" BES
+# failure) needs OpenGL + X11 headers to compile its interactive device
+# backend. rgl can build a software-rendering-only backend without a GPU,
+# but still needs these headers present to compile at all.
+#
+# libpng-dev: found the hard way testing rgl specifically -- it ALSO
+# #includes png.h directly (for texture/image support in its 3D device,
+# independent of the OpenGL/X11 headers above), and compilation fails
+# outright ("fatal error: png.h: No such file or directory") without it.
+# Confirmed this is the ONLY thing blocking rgl once OpenGL/X11/JAGS/JDK
+# were already in place -- a real, live build+load test against this exact
+# Dockerfile, not a guess from rgl's own documentation.
+#
+# jags (the JAGS MCMC sampler itself, NOT an R package -- it is the external
+# program rjags/R2jags dynamically link against) + default-jdk (rJava/
+# glmulti need a real JDK, not just a JRE, for R CMD javareconf below) --
+# issue #395: confirmed real "installed but not loadable" failures for
+# rjags/R2jags/rJava/glmulti against a real BES-corpus run (the R package
+# installs fine either way; it is the MISSING EXTERNAL PROGRAM/JDK that
+# dyn.load() fails against, not a compile step).
+#
+# R CMD javareconf here too (builder stage): rJava's own install.packages()
+# COMPILE step (below) probes for a JVM via the same javareconf-recorded
+# Makeconf entries the runtime stage's own javareconf call (near the bottom
+# of this file) sets up again for its copied-in JDK -- without running it
+# here first, rJava fails to even COMPILE (not merely the install-succeeds-
+# load-fails pattern the rest of this comment block documents).
+RUN R CMD javareconf
+
+# rjags module-path symlink: found the hard way testing rjags specifically --
+# it installs and even COMPILES cleanly, but then fails to LOAD with
+# "File not found: /usr/lib/JAGS/modules-4/basemod.so". Ubuntu's own `jags`
+# apt package installs its modules at the Debian MULTIARCH path
+# (/usr/lib/x86_64-linux-gnu/JAGS/modules-4/), but rjags's own configure
+# script resolves (hardcodes, at COMPILE time) the non-multiarch path
+# instead -- a real, confirmed mismatch, not a hypothetical. A symlink from
+# the path rjags expects to where the files actually are is the standard
+# fix (and the only ONE needed, confirmed directly: this alone took rjags
+# from failing to load to loading cleanly). Created in the BUILDER stage
+# because rjags is COMPILED here, and that compiled .so's expected search
+# path is baked in at this point; the runtime stage needs its own matching
+# symlink too (see below) since it has a freshly apt-installed `jags` of
+# its own with the same multiarch layout.
+RUN mkdir -p /usr/lib/JAGS && \
+    ln -s /usr/lib/x86_64-linux-gnu/JAGS/modules-4 /usr/lib/JAGS/modules-4
 
 # ── R packages from the corpus scan ─────────────────────────────────────────
 # See install_packages.R's own header for the CRAN -> CRAN Archive retry
@@ -166,7 +224,38 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnetcdf19t64 \
     libtcl8.6 libtk8.6 \
     libgdal34t64 libgeos-c1t64 libproj25 \
+    libudunits2-0 \
+    libgl1 libglu1-mesa libx11-6 \
+    libpng16-16 \
+    jags \
+    default-jdk \
     && rm -rf /var/lib/apt/lists/*
+# jags and default-jdk are RUNTIME, not builder-only, unlike this image's
+# other -dev/non-dev pairs: JAGS itself is an external PROGRAM rjags/R2jags
+# shell out to / dynamically link against at call time (not something an R
+# package's own compiled .so statically links at build time), and rJava
+# needs a live JVM (libjvm.so, reached via JAVA_HOME) present wherever R
+# actually runs, not just wherever rJava was compiled -- a JRE alone is
+# usually enough for libjvm.so, but default-jdk (not default-jre) is used
+# here because a handful of Java-dependent R packages invoke `javac`
+# dynamically at RUNTIME (not merely at package-build time), which a
+# JRE-only install does not provide.
+#
+# R CMD javareconf: rJava's install step probes for a JVM and records its
+# path/flags into R's own Makeconf: run here (AFTER the JDK is installed,
+# in the RUNTIME stage specifically) so the recorded path matches where
+# the JDK actually lives in the final image, not wherever (or whether) one
+# was present during the builder stage's own install_packages.R run.
+RUN R CMD javareconf
+
+# Same rjags module-path symlink as the builder stage (see that stage's own
+# comment for the full explanation) -- this stage has its OWN freshly
+# apt-installed `jags`, at the same Debian multiarch path, so it needs the
+# same symlink independently (the builder stage's own symlink lives only in
+# that stage's filesystem layer, which this FROM rocker/r-ver:latest stage
+# does not inherit).
+RUN mkdir -p /usr/lib/JAGS && \
+    ln -s /usr/lib/x86_64-linux-gnu/JAGS/modules-4 /usr/lib/JAGS/modules-4
 
 # ── Non-root user the run phase actually uses ───────────────────────────────
 # repro_run_scripts_docker() always runs as uid:gid 1000:1000 (see
