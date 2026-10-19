@@ -41,4 +41,16 @@ ENV PKG_CSV=/build/all_packages_py.csv
 ENV HEAVY_DL=1
 RUN python /build/install_packages_py.py
 
+# LaTeX, for plots whose text matplotlib typesets with LaTeX
+# (rcParams["text.usetex"] = True, or the pgf backend's pdflatex): without it
+# such a script stops with "Failed to process string with tex because latex
+# could not be found" (4 of 15 scripts of a physics data package, 2026-10-19).
+# These are the packages matplotlib's own documentation lists for usetex
+# (latex, dvipng, ghostscript, type1cm/type1ec in texlive-latex-extra,
+# cm-super), plus the recommended fonts. Only in the large image, for size.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      dvipng ghostscript cm-super \
+      texlive-latex-base texlive-latex-extra texlive-fonts-recommended \
+    && rm -rf /var/lib/apt/lists/*
+
 CMD ["python3"]

@@ -32,7 +32,7 @@ same state: built and tested locally, not yet pushed.
 | `metacheck_r_large` | `latest` | ~750 R packages (every package seen anywhere in the corpus scan) + JAGS + a JDK + the GDAL/GEOS/PROJ geospatial stack (sf/terra/stars/rgl/tmap/...) | ~4.9GB | You want maximum R coverage, including geospatial/ecology and JAGS-based Bayesian papers, and don't mind a bigger pull |
 | `metacheck_r_small` | `latest` | ~390 R packages (seen in ≥3 corpus files) + JAGS + a JDK | ~4.4GB | Smaller, more conservative default; a paper needing an uncommon or geospatial package falls back to installing it at run time |
 | `metacheck_py_small` | `latest` | ~45 Python packages seen in ≥2 of 486 scanned files (numpy/pandas/scipy/matplotlib/seaborn/scikit-learn/statsmodels/django/pytest/...) | ~2.7GB | Default for Python reproducibility checks; a paper needing an uncommon package installs it at run time |
-| `metacheck_py_large` | `latest` | everything `metacheck_py_small` has, plus ~70 more less-common packages and CPU-only torch + tensorflow-cpu | ~8.3GB | A paper uses a deep-learning framework and you don't want the slow run-time install |
+| `metacheck_py_large` | `latest` | everything `metacheck_py_small` has, plus ~70 more less-common packages and CPU-only torch + tensorflow-cpu, and LaTeX for matplotlib's `text.usetex` and pgf backend (added 2026-10-19: +0.64GB) | ~8.9GB | A paper uses a deep-learning framework or typesets its plots with LaTeX, and you don't want the slow run-time install |
 
 The R images include R (`rocker/r-ver` base) and Quarto. Neither includes
 LaTeX/TinyTeX or CmdStan — see "Planned variants" below. The Python images
