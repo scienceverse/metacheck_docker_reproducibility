@@ -196,7 +196,8 @@ RUN find /usr/local/lib/R/site-library -name "*.so" -exec strip --strip-unneeded
 # cache. A paper's script that itself calls install.packages() at RUN TIME
 # would need a compiler and is a separate, already-known limitation (static
 # analysis + repro_install_deps_docker() handle declared dependencies before
-# the run phase; this image is not meant to compile NEW packages on the fly).
+# the run phase). Those installs do compile packages the image lacks, so the
+# header files they need are added back further below.
 FROM rocker/r-ver:latest
 
 COPY --from=builder /opt/quarto /opt/quarto
@@ -247,6 +248,25 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # the JDK actually lives in the final image, not wherever (or whether) one
 # was present during the builder stage's own install_packages.R run.
 RUN R CMD javareconf
+
+# ── Header files for packages compiled during a paper's install ─────────────
+# metacheck installs what a paper loads and the image lacks, also from the CRAN
+# Archive, Bioconductor and GitHub (scienceverse/metacheck#568). Such a package
+# is compiled in the container, and stopped without these header files: zlib.h
+# for Biostrings/DESeq2/dada2/phyloseq/ShortRead, gdal/geos/proj for rgdal,
+# rgeos and maptools (with sp 2.1-4 from the Archive, which metacheck installs:
+# later sp versions dropped sp.h). Tested on a local build of this image plus
+# these packages: all of those then installed. About 0.7 GB.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    zlib1g-dev libbz2-dev liblzma-dev libpcre2-dev libicu-dev \
+    libpng-dev libjpeg-dev libtiff-dev \
+    libcurl4-openssl-dev libssl-dev libxml2-dev \
+    libfontconfig1-dev libfreetype6-dev \
+    libgdal-dev libgeos-dev libproj-dev libudunits2-dev \
+    libglpk-dev libgsl-dev libnetcdf-dev libhdf5-dev \
+    libgl1-mesa-dev libglu1-mesa-dev libx11-dev \
+    tcl-dev tk-dev \
+    && rm -rf /var/lib/apt/lists/*
 
 # Same rjags module-path symlink as the builder stage (see that stage's own
 # comment for the full explanation) -- this stage has its OWN freshly
